@@ -1,0 +1,2 @@
+pandas
+simple-slurm
