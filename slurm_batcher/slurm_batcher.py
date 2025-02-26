@@ -4,13 +4,10 @@ import argparse
 import json
 import logging
 import re
-import shlex
-import stat
 import subprocess
 import sys
 import textwrap
 from contextlib import contextmanager
-from html import parser
 from pathlib import Path
 from time import sleep
 
@@ -136,7 +133,7 @@ class Command:
         return f"Command {self.cmd} with args { {k: v for k, v in self.args.items() if not isinstance(v, UNUSED)} }"
 
 
-def collate(args, slurm_args=None):
+def aggregate(args, slurm_args=None):
     # Make sure job dependencies are satisfied
     if args["dependencies"]:
         with with_log_level(logging.ERROR):
@@ -155,13 +152,13 @@ def collate(args, slurm_args=None):
     metadata["output_dir"] = args["output_dir"]
     cmd = Command(args["command"])
 
-    # Collate the arguments from metadata, handling missing values
+    # aggregate the arguments from metadata, handling missing values
     metadata = metadata.reset_index()[cmd.args.keys()]
     nunique = metadata.nunique()
-    collate_fields = nunique[nunique > 1].index
+    aggregate_fields = nunique[nunique > 1].index
     cmd_args = metadata.iloc[0].to_dict()
 
-    for k, v in metadata[collate_fields].to_dict(orient="list").items():
+    for k, v in metadata[aggregate_fields].to_dict(orient="list").items():
         is_missing = [isinstance(i, MISSING) or i == "" for i in v]
         if not any(is_missing):
             cmd_args[k] = " ".join(v)
@@ -170,7 +167,7 @@ def collate(args, slurm_args=None):
         else:
             non_missing = [i for i, missing in zip(v, is_missing) if not missing]
             cmd_args[k] = " ".join(non_missing)
-            log.warning(f"Collated {k} with {len(v) - len(non_missing)} missing values")
+            log.warning(f"Aggregated {k} with {len(v) - len(non_missing)} missing values")
 
     cmd = cmd.update_args(cmd_args)
     log.info(f"Generated command {cmd()}")
@@ -211,7 +208,7 @@ def rerun(args, slurm_args=None):
         sys.exit(3)
     with with_log_level(logging.ERROR):
         metadata = status(args, slurm_args)
-    for index in metadata[metadata["status"] == "OUT_OF_ME+"].index:
+    for index in metadata[metadata["status"].isin(["OUT_OF_ME+", "CANCELLED", "FAILED"])].index:
         script = (
             Path(args["metadata_file"]).parent
             / "scripts"
@@ -289,13 +286,19 @@ def run(args, slurm_args=[]):
         slurm.add_cmd(f"mkdir -p {cmd.args['output_dir']}")
         for pre_cmd in config["pre_command"]:
             slurm.add_cmd(Command(pre_cmd, cmd.args)())
+        if args["use_tmpdir"]:
+            slurm.add_cmd(
+                "cleanup() { " + f'rsync -avP "{cmd.args["output_dir"]}/" "{cmd.args["real_output_dir"]}"' + "; }"
+            )
+        else:
+            slurm.add_cmd("cleanup() { true; }")
         # Add the main command
         slurm.add_cmd(cmd())
         # Add post commands
         for post_cmd in config["post_command"]:
             slurm.add_cmd(Command(post_cmd, cmd.args)())
         if args["use_tmpdir"]:
-            slurm.add_cmd(f"rsync -avP {cmd.args['output_dir']}/ {cmd.args['real_output_dir']}")
+            slurm.add_cmd(f'rsync -avP "{cmd.args["output_dir"]}/" "{cmd.args["real_output_dir"]}"')
         log.debug(f"Generated script:\n{slurm.script(shell='/usr/bin/bash', convert=False)}")
 
         # Create the script and submit the job
@@ -371,12 +374,14 @@ def parse_arguments(args):
     parser_rerun = subparsers.add_parser("rerun", help="Rerun jobs that failed in the metadata file")
     parser_rerun.set_defaults(func=rerun)
 
-    # Create the subparser for collate
-    parser_collate = subparsers.add_parser("collate", help="Run a command with columns aggregated into one string")
-    parser_collate.add_argument("-c", "--command", type=str, help="Command to run", required=True)
-    parser_collate.add_argument("-o", "--output-dir", type=str, help="Output directory", required=True)
-    parser_collate.add_argument("--dependencies", action="store_true", help="Include job dependencies", required=False)
-    parser_collate.set_defaults(func=collate)
+    # Create the subparser for aggregate
+    parser_aggregate = subparsers.add_parser("aggregate", help="Run a command with columns aggregated into one string")
+    parser_aggregate.add_argument("-c", "--command", type=str, help="Command to run", required=True)
+    parser_aggregate.add_argument("-o", "--output-dir", type=str, help="Output directory", required=True)
+    parser_aggregate.add_argument(
+        "--dependencies", action="store_true", help="Include job dependencies", required=False
+    )
+    parser_aggregate.set_defaults(func=aggregate)
 
     # Create the subparser for run
     parser_run = subparsers.add_parser("run", help="Run a command on a SLURM cluster")

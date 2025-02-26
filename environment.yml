@@ -1,0 +1,14 @@
+name: slurm-batcher
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python
+  - jupyter
+  - pandas
+  - scalene
+  - simple_slurm
+  - pip
+  - flit
+  - pip:
+    - psrecord[plot]
